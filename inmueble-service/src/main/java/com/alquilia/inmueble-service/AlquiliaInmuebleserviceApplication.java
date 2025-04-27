@@ -1,4 +1,4 @@
-package com.alquilia.inmueble-service;
+package com.alquilia.inmuebleservice;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
