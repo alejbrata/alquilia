@@ -1,3 +1,4 @@
+# scraping_api.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -51,36 +52,48 @@ def geocode(zona: str) -> str:
 
 @app.post("/buscar-viviendas")
 def buscar_viviendas(body: SearchRequest):
-    print(f"Zona={body.zona!r}, Precio≤{body.precio_maximo}")
-    center = geocode(body.zona); time.sleep(1)
-    token  = obtener_token()
+    # 1. Geocoding
+    center = geocode(body.zona)
+    time.sleep(1)
+    # 2. Token
+    token = obtener_token()
 
+    # 3. Llamada a Idealista
     headers = {"Authorization": f"Bearer {token}"}
     form_data = {
-        "operation":    "rent",                  # obligatorio
-        "propertyType": "homes",                 # obligatorio
-        "center":       center,                  # "lat,lon"
+        "operation":    "rent",
+        "propertyType": "homes",
+        "center":       center,
         "distance":     "1000",
         "maxPrice":     str(body.precio_maximo),
         "numPage":      "1",
         "maxItems":     "10",
-        "order":        "price",                 # <-- campo por el que ordenas
-        "sort":         "desc",                  # <-- dirección
+        "order":        "price",
+        "sort":         "desc",
         "locale":       "es"
     }
-
     resp = requests.post(SEARCH_URL, headers=headers, data=form_data)
-    print("Idealista status:", resp.status_code, resp.text[:300])
     if resp.status_code != 200:
-        return {"error": resp.json().get("message")}
+        # error genérico
+        return {"error": resp.json().get("message", "Error de Idealista")}
 
+    # 4. Parsear respuesta
     elementos = resp.json().get("elementList", [])
-    return [
-        {
-            "titulo": el.get("title","–"),
-            "precio": f"{el.get('price','–')}€",
-            "zona":   el.get("address","–"),
-            "enlace": f"https://www.idealista.com/inmueble/{el.get('propertyCode')}/"
-        }
-        for el in elementos
-    ]
+
+    # 5. Construir lista con campos nuevos
+    resultado = []
+    for el in elementos:
+        resultado.append({
+            "titulo":     el.get("title", "–"),
+            "precio":     f"{el.get('price', '–')}€",
+            "zona":       el.get("address", "–"),
+            "enlace":     f"https://www.idealista.com/inmueble/{el.get('propertyCode')}/",
+            "imagen":     el.get("thumbnail"),               # URL miniatura
+            "metros":     el.get("size", "–"),                # m²
+            "habitaciones": el.get("rooms", "–"),
+            "banos":      el.get("bathrooms", "–"),
+            "terraza":    el.get("terrace", False),           # booleano
+            "lat":        el.get("latitude"),
+            "lon":        el.get("longitude"),
+        })
+    return resultado
