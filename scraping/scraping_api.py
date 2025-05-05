@@ -14,23 +14,20 @@ TOKEN_URL   = "https://api.idealista.com/oauth/token"
 SEARCH_URL  = "https://api.idealista.com/3.5/es/search"
 GEOCODE_URL = "https://nominatim.openstreetmap.org/search"
 
-# --- Config Hugging Face ---
-HF_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+# --- Config Dolly (HuggingFace Inference API) ---
+HF_TOKEN = os.getenv("HF_HUB_TOKEN")
+HF_URL   = "https://api-inference.huggingface.co/models/distilgpt2"
 if not HF_TOKEN:
-    raise RuntimeError("❌ Define HUGGINGFACEHUB_API_TOKEN en tus variables de entorno")
-
-# Modelo hardcodeado, ya no necesitas definirlo externamente
-HF_MODEL = "bigscience/bloom-1b7"
-
-HF_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+    raise RuntimeError("Define la variable HF_HUB_TOKEN con tu token de Hugging Face")
 
 app = FastAPI()
+# ¡Esto debe ir justo después de instanciar `app`!
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],            # permite peticiones desde cualquier origen
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],            # GET, POST, PUT, DELETE…
+    allow_headers=["*"],            # Content-Type, Authorization…
 )
 
 
@@ -51,7 +48,7 @@ class InformeRequest(BaseModel):
 
 def obtener_token() -> str:
     auth = base64.b64encode(f"{API_KEY}:{API_SECRET}".encode()).decode()
-    resp = requests.post(
+    r = requests.post(
         TOKEN_URL,
         headers={
             "Authorization": f"Basic {auth}",
@@ -59,31 +56,29 @@ def obtener_token() -> str:
         },
         data={"grant_type": "client_credentials", "scope": "read"}
     )
-    resp.raise_for_status()
-    return resp.json()["access_token"]
+    r.raise_for_status()
+    return r.json()["access_token"]
 
 def geocode(zona: str) -> str:
-    resp = requests.get(
+    r = requests.get(
         GEOCODE_URL,
         params={"q": zona, "format": "json", "limit": 1},
         headers={"User-Agent": "AlquilIA/1.0"}
     )
-    resp.raise_for_status()
-    datos = resp.json()
-    if not datos:
+    r.raise_for_status()
+    arr = r.json()
+    if not arr:
         raise HTTPException(404, detail=f"No encontramos coords para '{zona}'")
-    return f"{datos[0]['lat']},{datos[0]['lon']}"
+    return f"{arr[0]['lat']},{arr[0]['lon']}"
 
 @app.post("/buscar-viviendas")
 def buscar_viviendas(body: SearchRequest):
-    # Geocoding
+    # 1) Geocode
     center = geocode(body.zona)
-    time.sleep(1)  # respetar rate limit de Nominatim
-
-    # Token Idealista
+    time.sleep(1)
+    # 2) Token Idealista
     token = obtener_token()
-
-    # Llamada a Idealista
+    # 3) Llamada Idealista
     headers = {"Authorization": f"Bearer {token}"}
     form = {
         "operation":    "rent",
@@ -97,33 +92,32 @@ def buscar_viviendas(body: SearchRequest):
         "sort":         "desc",
         "locale":       "es"
     }
-    resp = requests.post(SEARCH_URL, headers=headers, data=form)
-    if resp.status_code != 200:
-        raise HTTPException(resp.status_code, resp.json().get("message","Error Idealista"))
-
-    # Parseo
-    salida = []
-    for el in resp.json().get("elementList", []):
-        salida.append({
-            "titulo":       el.get("title", "–"),
-            "precio":       f"{el.get('price','–')}€",
-            "zona":         el.get("address","–"),
-            "enlace":       f"https://www.idealista.com/inmueble/{el.get('propertyCode')}/",
-            "imagen":       el.get("thumbnail"),
-            "metros":       el.get("size","–"),
-            "habitaciones": el.get("rooms","–"),
-            "banos":        el.get("bathrooms","–"),
-            "terraza":      el.get("terrace", False),
-            "lat":          el.get("latitude"),
-            "lon":          el.get("longitude"),
+    r = requests.post(SEARCH_URL, headers=headers, data=form)
+    if r.status_code != 200:
+        raise HTTPException(r.status_code, r.json().get("message","Error Idealista"))
+    # 4) Parseo y enriquecimiento
+    out = []
+    for el in r.json().get("elementList", []):
+        out.append({
+            "titulo":      el.get("title","–"),
+            "precio":      f"{el.get('price','–')}€",
+            "zona":        el.get("address","–"),
+            "enlace":      f"https://www.idealista.com/inmueble/{el.get('propertyCode')}/",
+            "imagen":      el.get("thumbnail"),                
+            "metros":      el.get("size","–"),
+            "habitaciones":el.get("rooms","–"),
+            "banos":       el.get("bathrooms","–"),
+            "terraza":     el.get("terrace", False),
+            "lat":         el.get("latitude"),
+            "lon":         el.get("longitude"),
         })
-    return salida
+    return out
 
 @app.post("/generar-informe")
 def generar_informe(req: InformeRequest):
-    # Construir prompt
+    # 5) Montar prompt
     prompt = (
-        "Informe de vivienda para inquilino en español:\n"
+        f"Informe de vivienda para inquilino en español:\n"
         f"- Título: {req.titulo}\n"
         f"- Precio: {req.precio}\n"
         f"- Zona: {req.zona}\n"
@@ -133,27 +127,12 @@ def generar_informe(req: InformeRequest):
         f"- Terraza: {'Sí' if req.terraza else 'No'}\n"
         f"- Enlace: {req.enlace}\n\n"
         "Por favor, aconseja al inquilino si el precio es adecuado para la zona, "
-        "duración típica del anuncio, recomendaciones y conclusiones breves."
+        "duración habitual del anuncio, recomendaciones y conclusiones breves."
     )
-
     # Llamada a HF Inference API
-    headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "inputs": prompt, 
-        "options": {"wait_for_model": True},
-        "parameters": {"max_new_tokens": 256, "temperature": 0.2}
-    }
-    resp = requests.post(HF_URL, headers=headers, json=payload)
-    try:
-        resp.raise_for_status()
-    except requests.HTTPError as e:
-        # Si da error de cola o espera, devolvemos el código y mensaje
-        raise HTTPException(resp.status_code, f"HF Inference Error: {resp.text}")
-
-    # La respuesta suele ser lista con dict {"generated_text": "..."}
-    data = resp.json()
-    text = data[0].get("generated_text", "").strip()
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 256}}
+    r = requests.post(HF_URL, headers=headers, json=payload)
+    r.raise_for_status()
+    text = r.json()[0]["generated_text"]
     return {"informe": text}
